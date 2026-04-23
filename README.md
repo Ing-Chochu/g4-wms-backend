@@ -9,7 +9,9 @@ Servidor de orquestación central para el sistema AS/RS, construido con FastAPI,
 3. Sube tu rama y pide integración (Merge).
 
 ## Instalación rápida para el equipo
-1. Clona el repositorio: `git clone [URL-DE-TU-REPOSITORIO]`
+1. Clona el repositorio: `git clone https://github.com/Ing-Chochu/g4-wms-backend.git`
 2. Crea el entorno virtual: `python -m venv venv`
 3. Activa el entorno (Windows): `.\venv\Scripts\activate`
 4. Instala las dependencias: `pip install -r requirements.txt`
+
+## PARA UN TUTORIAL MAS EN DETALLE, LEAN EL ARCHIVO Tutotial.txt
