@@ -21,5 +21,5 @@ class UserCreate(BaseModel):
 # CONTRATOS PARA OPERACIONES
 # ==========================================
 class PackageRequest(BaseModel):
-    sku: str
+    codigo: str
     peso: float # Si el Front manda "quince", Pydantic lo bloquea automáticamente.

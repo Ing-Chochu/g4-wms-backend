@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 # --- Importaciones de la aplicación (Modulares y limpias) ---
@@ -51,8 +52,16 @@ async def lifespan(app: FastAPI):
     print("🛑 Apagando WMS Backend...")
     mqtt_client.stop()
 
-# Inicialización de la aplicación FastAPI
 app = FastAPI(title="WMS Backend G4", lifespan=lifespan)
+
+# === CONFIGURACIÓN CORS (PERMISOS PARA EL FRONTEND) ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173"], # Vite o Create React App
+    allow_credentials=True,
+    allow_methods=["*"], # Permite POST, GET, PUT, DELETE
+    allow_headers=["*"], # Permite enviar Tokens de sesión
+)
 
 # ==========================================
 # ENDPOINTS DE SISTEMA
@@ -135,29 +144,22 @@ def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(datab
 # ==========================================
 @app.post("/ordenar_paquete", tags=["Operaciones"])
 async def order_package(request: schemas.PackageRequest, db: Session = Depends(database.get_db)):
-    """
-    Recibe la solicitud del operador, asigna posición y despacha al AGV.
-    """
-    # 1. Aplicar Algoritmo LIFO/FIFO para encontrar espacio
     target_pos = algorithms.find_first_empty_slot_fifo()
     if not target_pos:
-        return {"error": "Almacén lleno"}
+        raise HTTPException(status_code=400, detail="Almacén lleno")
 
-    # 2. Calcular Ruta A*
     agv_start = {"x": 0, "y": 0}
     route = algorithms.calculate_a_star_route(agv_start, target_pos)
 
-    # 3. Enviar Comando al Robot Físico vía MQTT
     command = {
         "action": "almacenar",
-        "sku": request.sku,
+        "sku": request.codigo,
         "ruta": route
     }
     mqtt_client.publish_command("agv1", command)
 
-    # 4. Guardar en PostgreSQL
     nuevo_paquete = Inventory(
-        sku=request.sku,
+        sku=request.codigo,
         pos_x=target_pos["x"],
         pos_y=target_pos["y"],
         status="in_transit"
