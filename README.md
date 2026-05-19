@@ -1,69 +1,198 @@
 # WMS Backend - AGV Control & Warehouse Management System 🚀
 
-Este repositorio contiene el "cerebro" del sistema de gestión de almacenes (WMS) para el control de robots móviles autónomos (AGV). El backend está desarrollado bajo una arquitectura de microservicios asíncronos enfocada en el alto rendimiento, la trazabilidad de inventarios y la seguridad industrial.
+Este repositorio contiene el "cerebro" y motor de orquestación del Sistema de Gestión de Almacenes (WMS) diseñado para el control de robots móviles autónomos (AGV). El backend está desarrollado bajo una arquitectura asíncrona enfocada en el alto rendimiento, la consistencia transaccional de inventarios y el cierre de lazo con hardware en tiempo real.
 
-## 🏗️ Arquitectura del Sistema
-El sistema se basa en una estructura modular que separa la lógica de negocio, la persistencia de datos y la comunicación IoT.
+## 🏗️ Arquitectura del Sistema y Flujo de Datos
 
-* **Framework:** FastAPI (Python 3.11+) - Seleccionado por su soporte nativo para `asyncio`.
-* **Base de Datos:** PostgreSQL - Motor relacional para integridad de datos.
-* **Protocolo IoT:** MQTT (Mosquitto) - Comunicación bidireccional en tiempo real con hardware.
-* **Seguridad:** RBAC (Role-Based Access Control) con hashing Bcrypt.
+El ecosistema se divide en una capa de software web y una red de dispositivos físicos que interactúan de forma distribuida:
 
+* **Framework Core:** FastAPI (Python 3.11+) - Seleccionado por su soporte nativo para operaciones I/O asíncronas (`asyncio`).
+* **Motor de Persistencia:** PostgreSQL - Base de datos relacional que garantiza transacciones bajo el estándar ACID.
+* **Capa de Transporte IoT:** MQTT (Mosquitto) - Protocolo de mensería liviano para comunicación bidireccional de baja latencia con hardware embebido.
+* **Seguridad:** Control de Acceso Basado en Roles (RBAC) y hashing de credenciales mediante Bcrypt nativo.
 
+---
 
-## 🛠️ Estado Actual del Desarrollo (Sprint 3 - Finalizado)
+## 🛠️ Estado Actual del Desarrollo (Sprint 3)
 
 ### 1. Gestión de Datos y Persistencia (90%)
-- [x] Migración completa de SQLite a **PostgreSQL**.
-- [x] Modelado de entidades: `Users`, `Roles`, `Inventory`, `WorkOrders` y `Vehicles`.
-- [x] Sistema de inyección de datos semilla (Sembrado automático de Admin al arrancar).
+
+* [x] Migración arquitectónica completa de SQLite a **PostgreSQL**.
+* [x] Modelado relacional de 5 entidades core: `Roles`, `Users`, `Inventory`, `Vehicles` y `WorkOrders`.
+* [x] Sistema de inyección automática de datos semilla (Sembrado de Admin maestro al arranque).
 
 ### 2. Seguridad y Autenticación (80%)
-- [x] Implementación de **Bcrypt nativo** para protección de credenciales.
-- [x] Endpoints de Registro y Login (`/usuarios`, `/login`).
-- [x] Configuración de **CORS** para integración segura con el Frontend (React/Vite).
 
-### 3. Lógica Logística y Algoritmos (75%)
-- [x] **Asignación FIFO:** Algoritmo de búsqueda de espacios disponibles en la matriz de almacenamiento.
-- [x] **Cálculo de Rutas:** Integración inicial del algoritmo de búsqueda de caminos (Pathfinding).
-- [x] Contratos de datos (Schemas) alineados con los requisitos del equipo de Interfaz.
+* [x] Cifrado criptográfico de contraseñas mediante **Bcrypt nativo** en el servidor.
+* [x] Endpoints funcionales de autenticación y registro (`/login`, `/usuarios`).
+* [x] Configuración de directivas **CORS** para intercomunicación segura con interfaces React/Vite.
 
-### 4. Conectividad Industrial (80%)
-- [x] Cliente **MQTT integrado** asíncrono (Paho-MQTT).
-- [x] Publicación de comandos de ruta formateados en JSON.
-- [x] Suscripción activa a telemetría de AGVs.
+### 3. Conectividad de Red y Cierre de Lazo (85%)
+
+* [x] Cliente **MQTT integrado asíncronamente** (`paho-mqtt` v2.0) corriendo en un hilo independiente sin congelar la API web.
+* [x] Suscripción activa al árbol de tópicos de telemetría y publicación de comandos.
+* [x] **SDK Polimórfico Embebido (`WMS_Client.h`):** Librería unificada en C++ para estandarizar los payloads JSON de los 3 subsistemas físicos del proyecto (AGV, Infraestructura y Visión).
 
 ---
 
-## 📅 Hoja de Ruta (Lo que falta por pulir)
+## 📦 Contrato de Interfaces de Hardware (SDK Embebido)
 
-Para el cierre del proyecto (Sprint 4), se tienen proyectadas las siguientes mejoras y adiciones técnicas:
+Para mitigar fallos por variables mal estructuradas durante la integración, el Backend provee la librería **`WMS_Client.h`**. Al inicializarse, el firmware debe declarar su `TipoDispositivo` (`AGV_SOFTWARE`, `INFRAESTRUCTURA`, o `VISION_ARTIFICIAL`) para habilitar sus funciones nativas y empaquetar automáticamente los JSON hacia los tópicos correctos.
 
-### 🛡️ Seguridad Avanzada
-* **Implementación de JWT (JSON Web Tokens):** Pasar de tokens simulados a tokens reales firmados para proteger cada endpoint.
-* **Middleware de Autorización:** Restringir el acceso a funciones críticas (como mover robots) solo a usuarios con rol `admin`.
+### 📋 Mapeo de Mensajes y Tópicos Estándar
 
-### 🧠 Optimización del "Cerebro" (Algoritmia)
-* **Refactorización de A* (A-Star):** Implementar la lógica de evitación de obstáculos dinámica basándose en la telemetría en tiempo real de otros AGVs.
-* **Optimización de Matriz:** Lógica para redistribución de carga (Slotting optimization).
+#### 1. Software del AGV (`AGV_SOFTWARE`)
 
-### 🔄 Cierre de Lazo (Feedback Loop)
-* **Manejador de Mensajes (on_message):** Programar el procesamiento automático de la telemetría para actualizar el estado del inventario en la DB de `in_transit` a `stored` sin intervención humana.
-* **Gestión de Errores MQTT:** Lógica de reintento y "Last Will and Testament" para detectar desconexiones de robots.
+Reporta su estado operativo y velocidad de encoders. No incluye batería ni posición local.
 
-### 📊 Monitoreo en Tiempo Real
-* **WebSockets:** Implementar un canal de datos en vivo para enviar la posición X,Y de los AGVs al Dashboard sin necesidad de refrescar la página.
+* **Tópico:** `wms/agv/{client_id}/telemetry`
+* **Payload JSON:** `{"velocidad": float, "estado": string}`
+
+#### 2. Infraestructura y Racks (`INFRAESTRUCTURA`)
+
+Informa alertas de los sensores de proximidad en estanterías cuando un paquete es posicionado, y capturas del lector QR de entrada para registrar qué mercancía ingresa.
+
+* **Tópico Sensores:** `wms/infra/sensores/eventos` -> `{"pos_x": int, "pos_y": int, "estado_fisico": "ocupado"|"vacio"}`
+* **Tópico Lector QR:** `wms/infra/qr/lecturas` -> `{"codigo": string}`
+
+#### 3. Visión Artificial (`VISION_ARTIFICIAL`)
+
+Cámara aérea cenital dedicada a trazar las coordenadas físicas lógicas de la flota en tiempo real.
+
+* **Tópico:** `wms/agv/{target_agv_id}/position`
+* **Payload JSON:** `{"x": int, "y": int}`
 
 ---
 
-## 🚀 Instalación y Pruebas Rápidas
+## 👥 Guía de Trabajo Colaborativo (Git Flow)
 
-1.  **Clonar el repositorio:** `git clone [URL-DEL-REPO]`
-2.  **Activar Entorno Virtual:** `source venv/bin/activate` o `.\venv\Scripts\activate`
-3.  **Instalar Dependencias:** `pip install -r requirements.txt`
-4.  **Configurar Variables de Entorno:** (Ver archivo `.env.example`)
-5.  **Ejecutar Servidor:** ```bash
-    uvicorn app.main:app --reload
-    ```
-6.  **Documentación Interactiva:** Visitar `http://127.0.0.1:8000/docs` para probar los endpoints.
+¡Hola niños! Ya dejé configurado el repositorio central, la estructura de carpetas y las librerías base para nuestro servidor (WMS Backend).
+
+Para que todos podamos trabajar al mismo tiempo sin borrar el código del otro, vamos a usar una regla de oro: **Nadie programa directamente en la rama `main**`. Cada uno creará una "rama" para su tarea, y luego uniremos todo.
+
+Aquí tienen el paso a paso exacto de lo que deben hacer. (Abran la terminal en VS Code y copien estos comandos).
+
+### 🛠️ FASE 1: Descargar el proyecto (Solo se hace la primera vez)
+
+1. **Clonar el repositorio:**
+Vayan a la carpeta donde guardan sus proyectos de la universidad y ejecuten:
+```bash
+git clone https://github.com/Ing-Chochu/g4-wms-backend.git
+
+```
+
+
+2. **Entrar a la carpeta del proyecto:**
+```bash
+cd g4-wms-backend
+
+```
+
+
+3. **Crear el Entorno Virtual (Nuestra burbuja de trabajo):**
+```bash
+python -m venv venv
+
+```
+
+
+4. **Activar el Entorno:**
+* **En Windows:** ```bash
+.\venv\Scripts\activate
+```
+*(Nota: Si les sale un error rojo en Windows, primero ejecuten `Set-ExecutionPolicy Unrestricted -Scope CurrentUser` y luego intenten de nuevo).*
+
+```
+
+
+* **En macOS/Linux:**
+```bash
+source venv/bin/activate
+
+```
+
+
+
+
+*(Deben ver un `(venv)` verde en su terminal. Si no lo ven, no avancen).*
+5. **Instalar todas las librerías mágicamente:**
+```bash
+pip install -r requirements.txt
+
+```
+
+
+
+### 👨‍💻 FASE 2: Empezar a trabajar en tu tarea (La Regla de Oro)
+
+Antes de escribir una sola línea de código, debes crear tu propia rama para no dañar el proyecto principal.
+
+1. **Actualiza tu compu (por si alguien subió algo nuevo):**
+```bash
+git pull origin main
+
+```
+
+
+2. **Crea tu rama y muévete a ella:**
+*(Cambia `mi-tarea` por lo que vayas a hacer, ej: `feat/base-de-datos` o `feat/api-login`).*
+```bash
+git checkout -b feat/mi-tarea
+
+```
+
+
+
+### 💾 FASE 3: Guardar y subir tus cambios (El Pan de cada día)
+
+Cuando termines una función o al final del día de trabajo, debes guardar tu progreso en la nube. Ejecuta estos 3 comandos en orden:
+
+1. **Prepara todos los archivos que cambiaste:**
+```bash
+git add .
+
+```
+
+
+2. **Toma la "foto" y ponle un mensaje de qué hiciste:**
+```bash
+git commit -m "feat: agregue las tablas de usuarios y roles"
+
+```
+
+
+3. **Sube tu rama a GitHub:**
+*(La primera vez que subas tu rama, usa este comando completo. Las siguientes veces solo bastará con poner `git push`).*
+```bash
+git push -u origin feat/mi-tarea
+
+```
+
+
+
+#### ⚡ Copiado y pegado rápido:
+
+```bash
+git add .
+git commit -m "feat: "
+git push
+
+```
+
+¡Y listo! Cuando su código esté subido, me avisan y yo me encargo de hacer el "Merge" (unir su código con el main de todos).
+
+---
+
+## 📅 Proyecciones y Hoja de Ruta (Sprint 4)
+
+* **Seguridad Avanzada:** Transición de tokens simulados a la implementación estricta de **JSON Web Tokens (JWT)** firmados criptográficamente para resguardar las rutas operativas.
+* **Cálculo de Caminos:** Implementación matemática del algoritmo **A* (A-Star)** real en la cuadrícula del almacén para evitar colisiones.
+* **Feedback Activo:** Programación de disparadores lógicos dentro del motor MQTT para actualizar de forma automatizada los estados de inventario en la base de datos tras las lecturas físicas de los ESP32.
+
+---
+
+**Desarrollado por:** Arnulfo Josue Sanchez Sanchez
+
+**Semestre:** Noveno - Ingeniería Mecatrónica
+
+**Universidad:** Universidad de Pamplona
