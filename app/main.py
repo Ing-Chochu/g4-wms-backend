@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,32 @@ from app.core.mqtt_client import mqtt_client
 from app.core.security import get_password_hash, verify_password
 from app.services import algorithms
 from app import schemas
+from pydantic import BaseModel
+import asyncio
+
+# ==========================================
+# ADMINISTRADOR DE WEBSOCKETS (Propuesta)
+# ==========================================
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        """Envía datos (como posición de AGVs) a todos los clientes conectados"""
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
 
 # ==========================================
 # EVENTOS DE ARRANQUE Y APAGADO (LIFESPAN)
@@ -64,6 +90,24 @@ app.add_middleware(
 )
 
 # ==========================================
+# CANAL DE COMUNICACIÓN EN TIEMPO REAL
+# ==========================================
+@app.websocket("/ws/telemetry")
+async def websocket_endpoint(websocket: WebSocket):
+    """Canal para que el Frontend reciba actualizaciones de AGVs en tiempo real"""
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Mantiene la conexión viva y puede recibir comandos del Front
+            data = await websocket.receive_text()
+            # Ejemplo: El front pide un reset manual
+            await websocket.send_json({"event": "ack", "detail": "Comando recibido"})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"Error en WS: {e}")
+
+# ==========================================
 # ENDPOINTS DE SISTEMA
 # ==========================================
 @app.get("/health", tags=["Sistema"])
@@ -78,27 +122,24 @@ def health_check(db: Session = Depends(database.get_db)):
 # ==========================================
 # ENDPOINTS DE SEGURIDAD
 # ==========================================
-@app.post("/login", response_model=schemas.LoginResponse, tags=["Seguridad"])
-def login(credenciales: schemas.UserLogin, db: Session = Depends(database.get_db)):
-    """
-    Endpoint que el Frontend usa para iniciar sesión.
-    Valida en la Base de Datos y devuelve el Rol del usuario.
-    """
-    # Buscar al usuario en PostgreSQL
-    user = db.query(User).filter(User.username == credenciales.username).first()
+class LoginRequestJSON(BaseModel):
+    username: str
+    password: str
+
+# 2. Modifica tu endpoint de Login para que use el modelo y devuelva lo que el Front espera
+@app.post("/login", tags=["Seguridad"])
+async def login(request: LoginRequestJSON, db: Session = Depends(database.get_db)):
+    # Buscamos al usuario
+    user = db.query(models.User).filter(models.User.username == request.username).first()
     
-    # Si no existe o la contraseña no coincide, bloqueamos el acceso (Error 401)
-    if not user or not verify_password(credenciales.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuario o contraseña incorrectos"
-        )
+    # Validamos (Asegúrate de importar bcrypt o tu validador de contraseñas)
+    if not user or not verify_password(request.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
     
-    # Respuesta exitosa para el Frontend
+    # ¡CRÍTICO! El Front espera exactamente estas llaves: "role" y "access_token"
     return {
-        "status": "success",
-        "role": user.role.name,  
-        "access_token": "fake-jwt-token-por-ahora" 
+        "access_token": "token-jwt-simulado-123", 
+        "role": user.role.name if user.role else "admin" # Asegura que devuelva un string como 'admin'
     }
 @app.post("/usuarios", tags=["Seguridad"])
 def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(database.get_db)):
@@ -176,9 +217,22 @@ async def order_package(request: schemas.PackageRequest, db: Session = Depends(d
     }
 
 @app.get("/inventario", tags=["Operaciones"])
-def ver_inventario(db: Session = Depends(database.get_db)):
-    """
-    Retorna todo el inventario de la matriz.
-    """
-    paquetes = db.query(Inventory).all()
-    return {"total_paquetes": len(paquetes), "inventario": paquetes}
+async def get_inventario(db: Session = Depends(database.get_db)):
+    items = db.query(models.Inventory).all()
+    
+    inventario_formateado = []
+    for item in items:
+        # Traducimos de la Base de Datos a lo que el React exige
+        inventario_formateado.append({
+            "id": item.id,
+            "producto_id": item.sku,
+            "ubicacion": f"A{item.pos_x}", # Simulamos una ubicación tipo "A1"
+            "estado": "almacenado" if item.status == "stored" else "En banda transportadora",
+            "trayectoria": 1,
+            "timestamp": str(item.created_at)
+        })
+        
+    return {
+        "total_paquetes": len(items),
+        "inventario": inventario_formateado
+    }
