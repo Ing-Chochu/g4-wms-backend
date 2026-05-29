@@ -136,11 +136,28 @@ async def login(request: LoginRequestJSON, db: Session = Depends(database.get_db
     if not user or not verify_password(request.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
     
-    # ¡CRÍTICO! El Front espera exactamente estas llaves: "role" y "access_token"
+    # El Front espera el rol como string para manejar la UI jerárquica
+    user_role = user.role.name if user.role else "operario"
+    
     return {
         "access_token": "token-jwt-simulado-123", 
-        "role": user.role.name if user.role else "admin" # Asegura que devuelva un string como 'admin'
+        "role": user_role,
+        "username": user.username
     }
+
+@app.get("/usuarios", tags=["Seguridad"])
+def listar_usuarios(db: Session = Depends(database.get_db)):
+    """Lista todos los usuarios registrados (Solo para vista de Superadmin)"""
+    users = db.query(models.User).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "role": u.role.name if u.role else "n/a",
+            "hashed_password": u.hashed_password
+        } for u in users
+    ]
+
 @app.post("/usuarios", tags=["Seguridad"])
 def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(database.get_db)):
     """
@@ -183,6 +200,18 @@ def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(datab
 # ==========================================
 # ENDPOINTS DE OPERACIONES LOGÍSTICAS
 # ==========================================
+class ProductRegistry(BaseModel):
+    sku: str
+    descripcion: str | None = None
+
+@app.post("/productos", tags=["Operaciones"])
+def registrar_producto(producto: ProductRegistry, db: Session = Depends(database.get_db)):
+    """Registra información del producto antes de su ingreso físico al almacén"""
+    nuevo = models.Inventory(sku=producto.sku, status="registrado", pos_x=0, pos_y=0)
+    db.add(nuevo)
+    db.commit()
+    return {"status": "success", "message": f"Producto {producto.sku} cargado al sistema"}
+
 @app.post("/ordenar_paquete", tags=["Operaciones"])
 async def order_package(request: schemas.PackageRequest, db: Session = Depends(database.get_db)):
     target_pos = algorithms.find_first_empty_slot_fifo()
@@ -222,14 +251,15 @@ async def get_inventario(db: Session = Depends(database.get_db)):
     
     inventario_formateado = []
     for item in items:
-        # Traducimos de la Base de Datos a lo que el React exige
+        # Paridad con useAlmacen.js: se requiere 'sku', 'status' y 'pos_x'
         inventario_formateado.append({
             "id": item.id,
-            "producto_id": item.sku,
-            "ubicacion": f"A{item.pos_x}", # Simulamos una ubicación tipo "A1"
-            "estado": "almacenado" if item.status == "stored" else "En banda transportadora",
+            "sku": item.sku,
+            "status": item.status if item.status else "registrado",
+            "pos_x": item.pos_x if item.pos_x is not None else 0,
+            "pos_y": item.pos_y if item.pos_y is not None else 0,
             "trayectoria": 1,
-            "timestamp": str(item.created_at)
+            "created_at": item.created_at.isoformat() if item.created_at else None
         })
         
     return {
