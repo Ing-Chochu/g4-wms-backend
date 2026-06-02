@@ -1,9 +1,11 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+import os
+from dotenv import load_dotenv
 
-# Estructura: postgresql+psycopg://usuario:contraseña@servidor:puerto/base_de_datos
-# ⚠️ CAMBIA 'tu_contraseña' por la tuya.
-SQLALCHEMY_DATABASE_URL = "postgresql+psycopg://postgres:unipam2114@localhost:5432/wms_db"
+load_dotenv()
+
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:unipam2114@localhost:5432/wms_db")
 
 # Para PostgreSQL ya no usamos el connect_args de SQLite. Es mucho más limpio.
 engine = create_engine(SQLALCHEMY_DATABASE_URL)

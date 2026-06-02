@@ -29,6 +29,7 @@ class Inventory(Base):
     __tablename__ = "inventory"
     id = Column(Integer, primary_key=True, index=True)
     sku = Column(String, index=True)
+    category = Column(String, nullable=True) # A, B o C
     pos_x = Column(Integer)
     pos_y = Column(Integer)
     status = Column(String, default="stored") 

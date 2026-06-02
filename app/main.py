@@ -202,12 +202,13 @@ def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(datab
 # ==========================================
 class ProductRegistry(BaseModel):
     sku: str
+    categoria: str # A, B o C
     descripcion: str | None = None
 
 @app.post("/productos", tags=["Operaciones"])
 def registrar_producto(producto: ProductRegistry, db: Session = Depends(database.get_db)):
     """Registra información del producto antes de su ingreso físico al almacén"""
-    nuevo = models.Inventory(sku=producto.sku, status="registrado", pos_x=0, pos_y=0)
+    nuevo = models.Inventory(sku=producto.sku, category=producto.categoria, status="registrado", pos_x=0, pos_y=0)
     db.add(nuevo)
     db.commit()
     return {"status": "success", "message": f"Producto {producto.sku} cargado al sistema"}

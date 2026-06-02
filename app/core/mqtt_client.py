@@ -13,6 +13,8 @@ class MQTTManager:
         
         # ÁRBOL DE TÓPICOS (El contrato de interfaces para los AGVs)
         self.telemetry_topic = "wms/agv/+/telemetry" # Escucha a TODOS los agv (+ es comodín)
+        self.qr_topic = "wms/infra/qr/lecturas"      # Tópico del lector físico
+        self.alert_topic = "wms/sistema/alerta"      # Para notificar errores
         self.command_topic = "wms/agv/{}/commands"   # Para enviar rutas
         
         # Paho MQTT v2.0+ exige declarar la versión de la API internamente
@@ -26,20 +28,81 @@ class MQTTManager:
         if reason_code == 0:
             logger.info("✅ Conectado exitosamente al Broker MQTT local")
             self.client.subscribe(self.telemetry_topic)
+            self.client.subscribe(self.qr_topic)
             logger.info(f"📡 Suscrito a telemetría: {self.telemetry_topic}")
+            logger.info(f"📡 Suscrito a lecturas QR: {self.qr_topic}")
         else:
             logger.error(f"❌ Error al conectar MQTT. Código: {reason_code}")
 
     def on_message(self, client, userdata, msg):
         try:
-            # Todo lo que mande el robot (batería, coordenadas) se lee aquí
             payload = json.loads(msg.payload.decode("utf-8"))
-            logger.info(f"📩 Telemetría recibida de [{msg.topic}]: {payload}")
             
-            # Más adelante, aquí guardaremos estos datos en la Base de Datos
+            if msg.topic == self.qr_topic:
+                self._handle_qr_scan(payload)
+            else:
+                logger.info(f"📩 Telemetría recibida de [{msg.topic}]: {payload}")
             
         except json.JSONDecodeError:
             logger.warning(f"⚠️ Mensaje no-JSON ignorado en {msg.topic}")
+
+    def _handle_qr_scan(self, payload: dict):
+        """Procesa el ingreso de un paquete detectado por QR"""
+        from app.database.database import SessionLocal
+        from app.database.models import Inventory, Vehicle
+        from app.services import algorithms
+
+        sku = payload.get("codigo")
+        if not sku:
+            return
+
+        db = SessionLocal()
+        try:
+            # 1. Verificar si el producto existe en el catálogo maestro
+            producto = db.query(Inventory).filter(Inventory.sku == sku, Inventory.status == "registrado").first()
+
+            if not producto:
+                logger.error(f"🚨 ALARMA: SKU {sku} no reconocido o ya almacenado.")
+                self.client.publish(self.alert_topic, json.dumps({
+                    "error": "Producto no registrado",
+                    "sku": sku,
+                    "timestamp": "now"
+                }))
+                return
+
+            # 2. Asignar espacio mediante FIFO
+            target_pos = algorithms.find_first_empty_slot_fifo()
+            if not target_pos:
+                logger.warning("📦 Almacén lleno, no hay espacio para el nuevo paquete.")
+                return
+
+            # 3. Seleccionar AGV disponible (agv1 por defecto para este prototipo)
+            agv = db.query(Vehicle).filter(Vehicle.status == "idle").first()
+            agv_id = agv.id if agv else "agv1"
+
+            # 4. Calcular ruta A* (Suponiendo que el QR está en el origen 0,0)
+            route = algorithms.calculate_a_star_route({"x": 0, "y": 0}, target_pos)
+
+            # 5. Publicar comando al AGV
+            command = {
+                "action": "store",
+                "sku": sku,
+                "target": target_pos,
+                "path": route
+            }
+            self.publish_command(agv_id, command)
+
+            # 6. Actualizar Base de Datos
+            producto.status = "in_transit"
+            producto.pos_x = target_pos["x"]
+            producto.pos_y = target_pos["y"]
+            db.commit()
+            logger.info(f"✅ Paquete {sku} asignado a {target_pos} vía {agv_id}")
+
+        except Exception as e:
+            logger.error(f"❌ Error procesando QR: {e}")
+        finally:
+            db.close()
 
     def start(self):
         """Inicia el cliente en un hilo fantasma para no congelar FastAPI"""
