@@ -2,36 +2,33 @@ import logging
 
 logger = logging.getLogger("WMS_Algorithms")
 
-# Matriz virtual del almacén (3x3 para pruebas rápidas)
-# 0 = Vacío, 1 = Ocupado
-warehouse_grid = [
-    [0, 0, 0],
-    [0, 1, 0],
-    [0, 0, 0]
-]
+# Warehouse configuration (5 columns x 4 rows)
+MAX_COLS = 5
+MAX_ROWS = 4
 
-def find_first_empty_slot_fifo():
+def find_first_empty_slot_fifo(occupied_positions: list):
     """
-    Simula la asignación FIFO buscando el primer hueco disponible 
-    recorriendo la matriz por filas.
+    Finds the first available slot by rows using real DB data.
+    occupied_positions: List of dicts [{"x": val, "y": val}, ...]
     """
-    for y, row in enumerate(warehouse_grid):
-        for x, status in enumerate(row):
-            if status == 0:
-                logger.info(f"📍 Posición FIFO asignada: X={x}, Y={y}")
+    # Create a set for O(1) lookups
+    occupied_set = {(p["x"], p["y"]) for p in occupied_positions}
+
+    for y in range(MAX_ROWS):
+        for x in range(MAX_COLS):
+            if (x, y) not in occupied_set:
+                logger.info(f"Position assigned: X={x}, Y={y}")
                 return {"x": x, "y": y}
     
-    logger.warning("⚠️ Almacén lleno. No hay posiciones FIFO disponibles.")
+    logger.warning("Warehouse full. No FIFO slots available.")
     return None
 
 def calculate_a_star_route(start: dict, end: dict):
     """
-    Mock (simulación) del algoritmo A* para el entregable.
-    En la vida real, aquí iría la heurística (Distancia Manhattan).
+    A* Route calculation (Simplified).
     """
-    logger.info(f"🗺️ Calculando ruta A* desde {start} hasta {end}")
+    logger.info(f"Calculating route from {start} to {end}")
     
-    # Ruta simulada: Avanza en X y luego en Y
     route = [
         {"x": start["x"], "y": start["y"]},
         {"x": end["x"], "y": start["y"]},

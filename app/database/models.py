@@ -41,6 +41,8 @@ class Vehicle(Base):
     battery_level = Column(Float, default=100.0)
     status = Column(String, default="idle") # idle, moving, charging, error
     last_connection = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    pos_x = Column(Integer, nullable=True, default=0)
+    pos_y = Column(Integer, nullable=True, default=0)
 
 class WorkOrder(Base):
     __tablename__ = "work_orders"

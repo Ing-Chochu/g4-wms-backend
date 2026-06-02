@@ -1,4 +1,5 @@
 import json
+import asyncio
 import paho.mqtt.client as mqtt
 import logging
 
@@ -17,12 +18,26 @@ class MQTTManager:
         self.alert_topic = "wms/sistema/alerta"      # Para notificar errores
         self.command_topic = "wms/agv/{}/commands"   # Para enviar rutas
         
+        # Puente para WebSockets
+        self._event_loop = None
+        self._broadcast_fn = None
+
         # Paho MQTT v2.0+ exige declarar la versión de la API internamente
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         
         # Conectar los eventos (cuando se conecte y cuando reciba mensaje)
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
+
+    def set_ws_bridge(self, loop, broadcast_fn):
+        self._event_loop = loop
+        self._broadcast_fn = broadcast_fn
+
+    def _emit_ws(self, data: dict):
+        if self._broadcast_fn and self._event_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_fn(data), self._event_loop
+            )
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
         if reason_code == 0:
@@ -40,11 +55,38 @@ class MQTTManager:
             
             if msg.topic == self.qr_topic:
                 self._handle_qr_scan(payload)
+            elif "telemetry" in msg.topic:
+                agv_id = msg.topic.split("/")[2]
+                self._handle_agv_telemetry(agv_id, payload)
             else:
-                logger.info(f"📩 Telemetría recibida de [{msg.topic}]: {payload}")
+                logger.info(f"📩 Mensaje recibido de [{msg.topic}]: {payload}")
             
         except json.JSONDecodeError:
             logger.warning(f"⚠️ Mensaje no-JSON ignorado en {msg.topic}")
+
+    def _handle_agv_telemetry(self, agv_id: str, payload: dict):
+        from app.database.database import SessionLocal
+        from app.database.models import Vehicle
+        
+        db = SessionLocal()
+        try:
+            vehicle = db.query(Vehicle).filter(Vehicle.id == agv_id).first()
+            if not vehicle:
+                vehicle = Vehicle(id=agv_id)
+                db.add(vehicle)
+            
+            vehicle.battery_level = payload.get("bateria", vehicle.battery_level)
+            vehicle.status = payload.get("estado", vehicle.status)
+            vehicle.pos_x = payload.get("x", vehicle.pos_x)
+            vehicle.pos_y = payload.get("y", vehicle.pos_y)
+            db.commit()
+
+            # Retransmitir al frontend vía WebSocket
+            self._emit_ws({"event": "telemetry", "agv_id": agv_id, "data": payload})
+        except Exception as e:
+            logger.error(f"Error actualizando telemetría para {agv_id}: {e}")
+        finally:
+            db.close()
 
     def _handle_qr_scan(self, payload: dict):
         """Procesa el ingreso de un paquete detectado por QR"""
@@ -68,6 +110,12 @@ class MQTTManager:
                     "sku": sku,
                     "timestamp": "now"
                 }))
+                self._emit_ws({
+                    "event": "alarma",
+                    "tipo": "alarma",
+                    "mensaje": f"Producto no registrado: {sku}",
+                    "sku": sku
+                })
                 return
 
             # 2. Asignar espacio mediante FIFO

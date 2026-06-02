@@ -1,13 +1,15 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 # --- Importaciones de la aplicación (Modulares y limpias) ---
 from app.database import database, models
 from app.database.models import Inventory, User, Role
 from app.core.mqtt_client import mqtt_client
-from app.core.security import get_password_hash, verify_password
+from app.core.security import get_password_hash, verify_password, create_access_token, decode_access_token
 from app.services import algorithms
 from app import schemas
 from pydantic import BaseModel
@@ -28,7 +30,7 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
-        """Envía datos (como posición de AGVs) a todos los clientes conectados"""
+        """Sends data to all connected clients"""
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
@@ -37,45 +39,79 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# --- Security Dependency ---
+security_scheme = HTTPBearer()
+
+async def get_current_user(auth: HTTPAuthorizationCredentials = Depends(security_scheme), db: Session = Depends(database.get_db)):
+    payload = decode_access_token(auth.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user = db.query(User).filter(User.username == payload.get("sub")).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
 # ==========================================
 # EVENTOS DE ARRANQUE Y APAGADO (LIFESPAN)
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Arrancando WMS Backend...")
-    
-    # 1. Crear las tablas automáticamente en PostgreSQL
+    print("Starting WMS Backend...")
+    # 1. Crear tablas y asegurar existencia de columnas de posición
     models.Base.metadata.create_all(bind=database.engine)
-    
-    # 2. Inyección de datos semilla (Crear Admin por defecto)
+    with database.engine.connect() as conn:
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0"))
+        conn.commit()
+
     db = database.SessionLocal()
     try:
-        # Verificar si el rol admin existe
-        admin_role = db.query(Role).filter(Role.name == "admin").first()
-        if not admin_role:
-            admin_role = Role(name="admin")
-            db.add(admin_role)
-            db.commit()
-            db.refresh(admin_role)
+        # Roles and Seed Users
+        role_names = ["superadmin", "admin", "operario"]
+        roles = {}
+        for rname in role_names:
+            role = db.query(Role).filter(Role.name == rname).first()
+            if not role:
+                role = Role(name=rname)
+                db.add(role)
+                db.commit()
+                db.refresh(role)
+            roles[rname] = role
 
-        # Verificar si el usuario admin existe
-        admin_user = db.query(User).filter(User.username == "admin").first()
-        if not admin_user:
-            hashed_pwd = get_password_hash("admin123")
-            nuevo_admin = User(username="admin", hashed_password=hashed_pwd, role_id=admin_role.id)
-            db.add(nuevo_admin)
+        # Default users credentials
+        default_users = [
+            ("superadmin", "SA@2025!", roles["superadmin"]),
+            ("admin", "Adm@2025!", roles["admin"]),
+            ("operario", "Op@2025!", roles["operario"])
+        ]
+
+        for uname, pwd, role in default_users:
+            if not db.query(User).filter(User.username == uname).first():
+                hashed_pwd = await get_password_hash(pwd)
+                db.add(User(username=uname, hashed_password=hashed_pwd, role_id=role.id))
+        
+        # Seed Vehicles (AGV_01 y AGV_02)
+        if not db.query(models.Vehicle).filter(models.Vehicle.id == "AGV_01").first():
+            db.add(models.Vehicle(id="AGV_01", battery_level=87.5, status="idle", pos_x=0, pos_y=0))
+        if not db.query(models.Vehicle).filter(models.Vehicle.id == "AGV_02").first():
+            db.add(models.Vehicle(id="AGV_02", battery_level=42.0, status="charging", pos_x=0, pos_y=0))
+
+        if db.new:
             db.commit()
-            print("✅ Usuario Administrador creado por defecto (admin / admin123)")
+            print("Seed users created successfully")
+
+    except Exception as e:
+        print(f"Error during lifespan seed: {e}")
     finally:
         db.close()
 
-    # 3. Arrancar el cliente MQTT para los AGVs
+    # 2. Iniciar puente WebSockets para el Frontend
+    loop = asyncio.get_event_loop()
+    mqtt_client.set_ws_bridge(loop, manager.broadcast)
     mqtt_client.start()
-    
-    yield # Aquí el servidor se queda corriendo y escuchando peticiones
-    
-    # 4. Lógica de apagado seguro
-    print("🛑 Apagando WMS Backend...")
+    yield
+    print("Stopping WMS Backend...")
     mqtt_client.stop()
 
 app = FastAPI(title="WMS Backend G4", lifespan=lifespan)
@@ -98,14 +134,12 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Mantiene la conexión viva y puede recibir comandos del Front
             data = await websocket.receive_text()
-            # Ejemplo: El front pide un reset manual
-            await websocket.send_json({"event": "ack", "detail": "Comando recibido"})
+            await websocket.send_json({"event": "ack", "detail": "Message received"})
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
-        print(f"Error en WS: {e}")
+        print(f"WS Error: {e}")
 
 # ==========================================
 # ENDPOINTS DE SISTEMA
@@ -129,24 +163,23 @@ class LoginRequestJSON(BaseModel):
 # 2. Modifica tu endpoint de Login para que use el modelo y devuelva lo que el Front espera
 @app.post("/login", tags=["Seguridad"])
 async def login(request: LoginRequestJSON, db: Session = Depends(database.get_db)):
-    # Buscamos al usuario
     user = db.query(models.User).filter(models.User.username == request.username).first()
     
-    # Validamos (Asegúrate de importar bcrypt o tu validador de contraseñas)
     if not user or not verify_password(request.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
     
-    # El Front espera el rol como string para manejar la UI jerárquica
     user_role = user.role.name if user.role else "operario"
     
+    token = create_access_token({"sub": user.username, "role": user_role, "id": user.id})
+
     return {
-        "access_token": "token-jwt-simulado-123", 
+        "access_token": token, 
         "role": user_role,
         "username": user.username
     }
 
 @app.get("/usuarios", tags=["Seguridad"])
-def listar_usuarios(db: Session = Depends(database.get_db)):
+def listar_usuarios(current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
     """Lista todos los usuarios registrados (Solo para vista de Superadmin)"""
     users = db.query(models.User).all()
     return [
@@ -154,16 +187,12 @@ def listar_usuarios(db: Session = Depends(database.get_db)):
             "id": u.id,
             "username": u.username,
             "role": u.role.name if u.role else "n/a",
-            "hashed_password": u.hashed_password
+            "activo": u.is_active
         } for u in users
     ]
 
 @app.post("/usuarios", tags=["Seguridad"])
-def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(database.get_db)):
-    """
-    Endpoint para registrar un nuevo usuario en el sistema.
-    """
-    # 1. Verificar si el nombre de usuario ya está ocupado
+async def crear_usuario(usuario_nuevo: schemas.UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
     usuario_existente = db.query(User).filter(User.username == usuario_nuevo.username).first()
     if usuario_existente:
         raise HTTPException(
@@ -171,7 +200,6 @@ def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(datab
             detail="El nombre de usuario ya está en uso"
         )
 
-    # 2. Verificar si el rol solicitado existe. Si no, lo creamos para no bloquear el sistema.
     rol_db = db.query(Role).filter(Role.name == usuario_nuevo.role).first()
     if not rol_db:
         rol_db = Role(name=usuario_nuevo.role)
@@ -179,10 +207,8 @@ def crear_usuario(usuario_nuevo: schemas.UserCreate, db: Session = Depends(datab
         db.commit()
         db.refresh(rol_db)
 
-    # 3. Encriptar la contraseña (¡Nunca en texto plano!)
-    hashed_pwd = get_password_hash(usuario_nuevo.password)
+    hashed_pwd = await get_password_hash(usuario_nuevo.password)
 
-    # 4. Guardar el nuevo usuario en PostgreSQL
     nuevo_user_db = User(
         username=usuario_nuevo.username,
         hashed_password=hashed_pwd,
@@ -214,8 +240,12 @@ def registrar_producto(producto: ProductRegistry, db: Session = Depends(database
     return {"status": "success", "message": f"Producto {producto.sku} cargado al sistema"}
 
 @app.post("/ordenar_paquete", tags=["Operaciones"])
-async def order_package(request: schemas.PackageRequest, db: Session = Depends(database.get_db)):
-    target_pos = algorithms.find_first_empty_slot_fifo()
+async def order_package(request: schemas.PackageRequest, current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
+    # Get occupied slots from DB
+    occupied = db.query(Inventory.pos_x, Inventory.pos_y).filter(Inventory.status != "removed").all()
+    occupied_list = [{"x": o.pos_x, "y": o.pos_y} for o in occupied]
+
+    target_pos = algorithms.find_first_empty_slot_fifo(occupied_list)
     if not target_pos:
         raise HTTPException(status_code=400, detail="Almacén lleno")
 
@@ -229,13 +259,26 @@ async def order_package(request: schemas.PackageRequest, db: Session = Depends(d
     }
     mqtt_client.publish_command("agv1", command)
 
-    nuevo_paquete = Inventory(
-        sku=request.codigo,
-        pos_x=target_pos["x"],
-        pos_y=target_pos["y"],
-        status="in_transit"
-    )
-    db.add(nuevo_paquete)
+    # Reutilizar registro previo si existe con status 'registrado'
+    paquete = db.query(Inventory).filter(
+        Inventory.sku == request.codigo,
+        Inventory.status == "registrado"
+    ).first()
+
+    if paquete:
+        paquete.pos_x = target_pos["x"]
+        paquete.pos_y = target_pos["y"]
+        paquete.status = "in_transit"
+        nuevo_paquete = paquete
+    else:
+        nuevo_paquete = Inventory(
+            sku=request.codigo,
+            pos_x=target_pos["x"],
+            pos_y=target_pos["y"],
+            status="in_transit"
+        )
+        db.add(nuevo_paquete)
+
     db.commit()
     db.refresh(nuevo_paquete)
 
@@ -243,11 +286,12 @@ async def order_package(request: schemas.PackageRequest, db: Session = Depends(d
         "status": "Orden guardada en Base de Datos",
         "id_paquete": nuevo_paquete.id,
         "asignacion_fifo": target_pos,
-        "ruta_asignada": route
+        "ruta_asignada": route,
+        "operador": current_user.username
     }
 
 @app.get("/inventario", tags=["Operaciones"])
-async def get_inventario(db: Session = Depends(database.get_db)):
+async def get_inventario(current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
     items = db.query(models.Inventory).all()
     
     inventario_formateado = []
@@ -256,6 +300,7 @@ async def get_inventario(db: Session = Depends(database.get_db)):
         inventario_formateado.append({
             "id": item.id,
             "sku": item.sku,
+            "category": item.category or "",
             "status": item.status if item.status else "registrado",
             "pos_x": item.pos_x if item.pos_x is not None else 0,
             "pos_y": item.pos_y if item.pos_y is not None else 0,
@@ -267,3 +312,39 @@ async def get_inventario(db: Session = Depends(database.get_db)):
         "total_paquetes": len(items),
         "inventario": inventario_formateado
     }
+
+@app.get("/agvs", tags=["Flota"])
+def listar_agvs(db: Session = Depends(database.get_db)):
+    """Retorna el estado y posición de toda la flota de robots"""
+    vehicles = db.query(models.Vehicle).all()
+    return [
+        {
+            "id": v.id,
+            "battery_level": v.battery_level,
+            "status": v.status,
+            "pos_x": v.pos_x if v.pos_x is not None else 0,
+            "pos_y": v.pos_y if v.pos_y is not None else 0,
+            "last_connection": v.last_connection.isoformat() if v.last_connection else None,
+        }
+        for v in vehicles
+    ]
+
+@app.put("/agvs/{agv_id}", tags=["Flota"])
+async def actualizar_agv(agv_id: str, data: dict, db: Session = Depends(database.get_db)):
+    """Endpoint para actualizar telemetría manualmente y notificar vía WS"""
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == agv_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehículo no encontrado")
+    vehicle.battery_level = data.get("battery_level", vehicle.battery_level)
+    vehicle.status = data.get("status", vehicle.status)
+    vehicle.pos_x = data.get("pos_x", vehicle.pos_x)
+    vehicle.pos_y = data.get("pos_y", vehicle.pos_y)
+    db.commit()
+    await manager.broadcast({"event": "telemetry", "agv_id": agv_id, "data": data})
+    return {"status": "success"}
+
+@app.post("/test/simular-qr", tags=["Pruebas"])
+def simular_qr(body: dict):
+    """Simula una lectura física de QR enviando un mensaje al broker MQTT"""
+    mqtt_client.client.publish("wms/infra/qr/lecturas", json.dumps({"codigo": body.get("sku"), "source": "frontend_sim"}))
+    return {"status": "success", "message": "Comando enviado al broker"}
