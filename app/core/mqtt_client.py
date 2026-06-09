@@ -119,7 +119,10 @@ class MQTTManager:
                 return
 
             # 2. Asignar espacio mediante FIFO
-            target_pos = algorithms.find_first_empty_slot_fifo()
+            occupied = db.query(Inventory.pos_x, Inventory.pos_y).filter(Inventory.status != "removed").all()
+            occupied_list = [{"x": o.pos_x, "y": o.pos_y} for o in occupied]
+            
+            target_pos = algorithms.find_first_empty_slot_fifo(occupied_list)
             if not target_pos:
                 logger.warning("📦 Almacén lleno, no hay espacio para el nuevo paquete.")
                 return

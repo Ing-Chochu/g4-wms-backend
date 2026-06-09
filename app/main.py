@@ -14,6 +14,12 @@ from app.services import algorithms
 from app import schemas
 from pydantic import BaseModel
 import asyncio
+import uuid
+import json
+import qrcode
+import io
+import base64
+import socket
 
 # ==========================================
 # ADMINISTRADOR DE WEBSOCKETS (Propuesta)
@@ -50,7 +56,26 @@ async def get_current_user(auth: HTTPAuthorizationCredentials = Depends(security
     user = db.query(User).filter(User.username == payload.get("sub")).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+
+    # Verificar que el session_token del JWT coincide con el de la DB
+    token_en_jwt = payload.get("session_token")
+    if token_en_jwt is None or token_en_jwt != user.session_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SESSION_INVALIDATED"
+        )
+
     return user
+
+# --- Helpers ---
+def get_local_ip():
+    """Obtiene la IP local de la máquina para que el QR funcione en la red"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    finally:
+        s.close()
 
 # ==========================================
 # EVENTOS DE ARRANQUE Y APAGADO (LIFESPAN)
@@ -63,6 +88,13 @@ async def lifespan(app: FastAPI):
     with database.engine.connect() as conn:
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0"))
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token TEXT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS modelo TEXT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS capacidad_kg FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS velocidad_max FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS autonomia_min INTEGER"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS ubicacion_inicial TEXT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS descripcion TEXT"))
         conn.commit()
 
     db = database.SessionLocal()
@@ -170,7 +202,17 @@ async def login(request: LoginRequestJSON, db: Session = Depends(database.get_db
     
     user_role = user.role.name if user.role else "operario"
     
-    token = create_access_token({"sub": user.username, "role": user_role, "id": user.id})
+    # Genera un token de sesión único y lo guarda en DB
+    nuevo_session_token = str(uuid.uuid4())
+    user.session_token = nuevo_session_token
+    db.commit()
+
+    token = create_access_token({
+        "sub": user.username, 
+        "role": user_role, 
+        "id": user.id,
+        "session_token": nuevo_session_token
+    })
 
     return {
         "access_token": token, 
@@ -348,3 +390,87 @@ def simular_qr(body: dict):
     """Simula una lectura física de QR enviando un mensaje al broker MQTT"""
     mqtt_client.client.publish("wms/infra/qr/lecturas", json.dumps({"codigo": body.get("sku"), "source": "frontend_sim"}))
     return {"status": "success", "message": "Comando enviado al broker"}
+
+# ==========================================
+# ENDPOINTS DE ROBOTS (GESTIÓN Y QR)
+# ==========================================
+class RobotCreate(BaseModel):
+    nombre: str | None = None
+    modelo: str
+    capacidad_kg: float
+    velocidad_max: float
+    autonomia_min: int
+    ubicacion_inicial: str | None = "Zona A"
+    descripcion: str | None = None
+
+@app.post("/robots", tags=["Robots"])
+async def crear_robot(
+    robot: RobotCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Crea un nuevo robot AGV con numeración automática y genera su QR"""
+    total = db.query(models.Vehicle).count()
+    numero = total + 1
+    nuevo_id = robot.nombre if robot.nombre else f"Robot {numero}"
+
+    if db.query(models.Vehicle).filter(models.Vehicle.id == nuevo_id).first():
+        raise HTTPException(status_code=400, detail=f"Ya existe un robot con el ID '{nuevo_id}'")
+
+    nuevo = models.Vehicle(
+        id=nuevo_id,
+        battery_level=100.0,
+        status="idle",
+        pos_x=0,
+        pos_y=0,
+        modelo=robot.modelo,
+        capacidad_kg=robot.capacidad_kg,
+        velocidad_max=robot.velocidad_max,
+        autonomia_min=robot.autonomia_min,
+        ubicacion_inicial=robot.ubicacion_inicial,
+        descripcion=robot.descripcion
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+
+    # Generación de QR
+    LOCAL_IP = get_local_ip()
+    url_qr = f"http://{LOCAL_IP}:3000/robot/{nuevo_id}"
+    
+    qr = qrcode.QRCode(version=1, box_size=8, border=4)
+    qr.add_data(url_qr)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#003366", back_color="white")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+
+    return {
+        "status": "success",
+        "robot_id": nuevo_id,
+        "qr_base64": qr_base64,
+        "qr_url": url_qr
+    }
+
+@app.get("/robots/count", tags=["Robots"])
+def contar_robots(db: Session = Depends(database.get_db)):
+    total = db.query(models.Vehicle).count()
+    return {"total": total, "siguiente_nombre": f"Robot {total + 1}"}
+
+@app.get("/robots/{robot_id}", tags=["Robots"])
+def get_robot(robot_id: str, db: Session = Depends(database.get_db)):
+    robot = db.query(models.Vehicle).filter(models.Vehicle.id == robot_id).first()
+    if not robot:
+        raise HTTPException(status_code=404, detail="Robot no encontrado")
+    
+    return robot
+
+@app.delete("/robots/{robot_id}", tags=["Robots"])
+async def eliminar_robot(robot_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
+    robot = db.query(models.Vehicle).filter(models.Vehicle.id == robot_id).first()
+    if not robot:
+        raise HTTPException(status_code=404, detail="Robot no encontrado")
+    db.delete(robot)
+    db.commit()
+    return {"status": "success", "message": f"Robot '{robot_id}' eliminado"}

@@ -19,6 +19,7 @@ class User(Base):
     hashed_password = Column(String)
     is_active = Column(Boolean, default=True)
     role_id = Column(Integer, ForeignKey("roles.id")) # Relación con tabla Roles
+    session_token = Column(String, nullable=True)
     
     role = relationship("Role", back_populates="users")
 
@@ -43,6 +44,12 @@ class Vehicle(Base):
     last_connection = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     pos_x = Column(Integer, nullable=True, default=0)
     pos_y = Column(Integer, nullable=True, default=0)
+    modelo = Column(String, nullable=True)
+    capacidad_kg = Column(Float, nullable=True)
+    velocidad_max = Column(Float, nullable=True)
+    autonomia_min = Column(Integer, nullable=True)
+    ubicacion_inicial = Column(String, nullable=True)
+    descripcion = Column(String, nullable=True)
 
 class WorkOrder(Base):
     __tablename__ = "work_orders"
