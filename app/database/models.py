@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 from sqlalchemy.orm import relationship
+from datetime import datetime, timedelta
 from .database import Base
 
 # ==========================================
@@ -51,6 +52,16 @@ class Vehicle(Base):
     ubicacion_inicial = Column(String, nullable=True)
     descripcion = Column(String, nullable=True)
 
+class TelemetryLog(Base):
+    __tablename__ = "telemetry_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    vehicle_id = Column(String, ForeignKey("vehicles.id"))
+    battery_level = Column(Float)
+    status = Column(String)
+    pos_x = Column(Integer, default=0)
+    pos_y = Column(Integer, default=0)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
 class WorkOrder(Base):
     __tablename__ = "work_orders"
     id = Column(Integer, primary_key=True, index=True)
@@ -69,3 +80,15 @@ class AuditLog(Base):
     action = Column(String) # Ej: "LOGIN", "ORDEN_CREADA"
     details = Column(String)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+def purge_old_data(db_session):
+    """Elimina datos antiguos para optimizar el performance de PostgreSQL"""
+    # Purga de telemetría > 24 horas
+    telemetry_limit = datetime.now() - timedelta(hours=24)
+    db_session.query(TelemetryLog).filter(TelemetryLog.timestamp < telemetry_limit).delete()
+    
+    # Purga de logs de auditoría > 30 días
+    logs_limit = datetime.now() - timedelta(days=30)
+    db_session.query(AuditLog).filter(AuditLog.timestamp < logs_limit).delete()
+    
+    db_session.commit()

@@ -15,12 +15,14 @@ class MQTTManager:
         # ÁRBOL DE TÓPICOS (El contrato de interfaces para los AGVs)
         self.telemetry_topic = "wms/agv/+/telemetry" # Escucha a TODOS los agv (+ es comodín)
         self.qr_topic = "wms/infra/qr/lecturas"      # Tópico del lector físico
+        self.sensor_topic = "wms/infra/sensores/eventos" # Sensores de estantería
         self.alert_topic = "wms/sistema/alerta"      # Para notificar errores
         self.command_topic = "wms/agv/{}/commands"   # Para enviar rutas
         
         # Puente para WebSockets
         self._event_loop = None
         self._broadcast_fn = None
+        self._alert_broadcast_fn = None
 
         # Paho MQTT v2.0+ exige declarar la versión de la API internamente
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -29,9 +31,10 @@ class MQTTManager:
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
-    def set_ws_bridge(self, loop, broadcast_fn):
+    def set_ws_bridge(self, loop, broadcast_fn, alert_broadcast_fn):
         self._event_loop = loop
         self._broadcast_fn = broadcast_fn
+        self._alert_broadcast_fn = alert_broadcast_fn
 
     def _emit_ws(self, data: dict):
         if self._broadcast_fn and self._event_loop:
@@ -39,11 +42,19 @@ class MQTTManager:
                 self._broadcast_fn(data), self._event_loop
             )
 
+    def _emit_alert_ws(self, data: dict):
+        if self._alert_broadcast_fn and self._event_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._alert_broadcast_fn(data), self._event_loop
+            )
+
     def on_connect(self, client, userdata, flags, reason_code, properties):
         if reason_code == 0:
             logger.info("✅ Conectado exitosamente al Broker MQTT local")
             self.client.subscribe(self.telemetry_topic)
             self.client.subscribe(self.qr_topic)
+            self.client.subscribe(self.sensor_topic)
+            logger.info(f"📡 Suscrito a eventos de sensores: {self.sensor_topic}")
             logger.info(f"📡 Suscrito a telemetría: {self.telemetry_topic}")
             logger.info(f"📡 Suscrito a lecturas QR: {self.qr_topic}")
         else:
@@ -55,6 +66,8 @@ class MQTTManager:
             
             if msg.topic == self.qr_topic:
                 self._handle_qr_scan(payload)
+            elif msg.topic == self.sensor_topic:
+                self._handle_sensor_event(payload)
             elif "telemetry" in msg.topic:
                 agv_id = msg.topic.split("/")[2]
                 self._handle_agv_telemetry(agv_id, payload)
@@ -66,7 +79,7 @@ class MQTTManager:
 
     def _handle_agv_telemetry(self, agv_id: str, payload: dict):
         from app.database.database import SessionLocal
-        from app.database.models import Vehicle
+        from app.database.models import Vehicle, TelemetryLog
         
         db = SessionLocal()
         try:
@@ -75,16 +88,73 @@ class MQTTManager:
                 vehicle = Vehicle(id=agv_id)
                 db.add(vehicle)
             
-            vehicle.battery_level = payload.get("bateria", vehicle.battery_level)
-            vehicle.status = payload.get("estado", vehicle.status)
+            new_battery = payload.get("bateria", vehicle.battery_level)
+            new_status = payload.get("estado", vehicle.status)
+            
+            vehicle.battery_level = new_battery
+            vehicle.status = new_status
             vehicle.pos_x = payload.get("x", vehicle.pos_x)
             vehicle.pos_y = payload.get("y", vehicle.pos_y)
+
+            # Persistir log de telemetría para historial (sujeto a purga)
+            db.add(TelemetryLog(vehicle_id=agv_id, battery_level=new_battery, status=new_status))
             db.commit()
 
             # Retransmitir al frontend vía WebSocket
             self._emit_ws({"event": "telemetry", "agv_id": agv_id, "data": payload})
+
+            # LÓGICA DE ALERTAS HMI
+            if new_battery < 20 or new_status == "error":
+                alert_payload = {
+                    "event": "alarma_critica",
+                    "agv_id": agv_id,
+                    "tipo": "BATERIA_BAJA" if new_battery < 20 else "FALLO_SISTEMA",
+                    "nivel": new_battery,
+                    "mensaje": f"Alerta en {agv_id}: Revisar hardware de inmediato."
+                }
+                self._emit_alert_ws(alert_payload)
+
         except Exception as e:
             logger.error(f"Error actualizando telemetría para {agv_id}: {e}")
+        finally:
+            db.close()
+
+    def _handle_sensor_event(self, payload: dict):
+        """Maneja la confirmación física de almacenamiento desde los racks"""
+        from app.database.database import SessionLocal
+        from app.database.models import Inventory
+        
+        pos_x = payload.get("pos_x")
+        pos_y = payload.get("pos_y")
+        estado_fisico = payload.get("estado_fisico") # "ocupado" o "vacio"
+
+        if pos_x is None or pos_y is None:
+            return
+
+        db = SessionLocal()
+        try:
+            # Aplicamos bloqueo selectivo (FOR UPDATE) para evitar colisiones con el endpoint de despacho
+            item = db.query(Inventory).filter(
+                Inventory.pos_x == pos_x,
+                Inventory.pos_y == pos_y,
+                Inventory.status == "in_transit"
+            ).with_for_update().first()
+
+            if item and estado_fisico == "ocupado":
+                item.status = "stored"
+                db.commit()
+                logger.info(f"📦 Lazo Cerrado: SKU {item.sku} confirmado en posición ({pos_x},{pos_y})")
+                
+                # Notificar al Front para actualizar el mapa visual
+                self._emit_ws({
+                    "event": "inventory_update",
+                    "sku": item.sku,
+                    "status": "stored",
+                    "pos": {"x": pos_x, "y": pos_y}
+                })
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error en actualización de sensor: {e}")
         finally:
             db.close()
 

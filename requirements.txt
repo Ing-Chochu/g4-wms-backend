@@ -5,3 +5,7 @@ SQLAlchemy==2.0.49
 psycopg[binary]==3.3.3
 PyJWT==2.12.1
 passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+APScheduler==3.11.0
+qrcode==8.0
+pillow==11.1.0

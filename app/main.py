@@ -20,6 +20,7 @@ import qrcode
 import io
 import base64
 import socket
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==========================================
 # ADMINISTRADOR DE WEBSOCKETS (Propuesta)
@@ -44,6 +45,8 @@ class ConnectionManager:
                 pass
 
 manager = ConnectionManager()
+alert_manager = ConnectionManager()
+scheduler = AsyncIOScheduler()
 
 # --- Security Dependency ---
 security_scheme = HTTPBearer()
@@ -76,6 +79,15 @@ def get_local_ip():
         return s.getsockname()[0]
     finally:
         s.close()
+
+async def task_purge_database():
+    """Tarea programada para limpiar registros antiguos"""
+    db = database.SessionLocal()
+    try:
+        models.purge_old_data(db)
+        print("✅ Purga de telemetría y logs completada con éxito.")
+    finally:
+        db.close()
 
 # ==========================================
 # EVENTOS DE ARRANQUE Y APAGADO (LIFESPAN)
@@ -138,20 +150,26 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # 2. Iniciar puente WebSockets para el Frontend
+    # 2. Configurar Puentes WebSockets y Tareas
     loop = asyncio.get_event_loop()
-    mqtt_client.set_ws_bridge(loop, manager.broadcast)
+    mqtt_client.set_ws_bridge(loop, manager.broadcast, alert_manager.broadcast)
     mqtt_client.start()
+    
+    # 3. Iniciar Scheduler (Purga a las 03:00 AM)
+    scheduler.add_job(task_purge_database, 'cron', hour=3)
+    scheduler.start()
+
     yield
     print("Stopping WMS Backend...")
     mqtt_client.stop()
+    scheduler.shutdown()
 
 app = FastAPI(title="WMS Backend G4", lifespan=lifespan)
 
 # === CONFIGURACIÓN CORS (PERMISOS PARA EL FRONTEND) ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"], # Vite o Create React App
+    allow_origins=["*"], # En producción local, '*' permite que cualquier IP de la LAN se conecte
     allow_credentials=True,
     allow_methods=["*"], # Permite POST, GET, PUT, DELETE
     allow_headers=["*"], # Permite enviar Tokens de sesión
@@ -172,6 +190,18 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
     except Exception as e:
         print(f"WS Error: {e}")
+
+@app.websocket("/ws/alertas")
+async def alerts_websocket_endpoint(websocket: WebSocket):
+    """Canal para alertas críticas (Colisiones, batería baja, etc.)"""
+    await alert_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        alert_manager.disconnect(websocket)
+    except Exception as e:
+        print(f"WS Alert Error: {e}")
 
 # ==========================================
 # ENDPOINTS DE SISTEMA
@@ -274,7 +304,7 @@ class ProductRegistry(BaseModel):
     descripcion: str | None = None
 
 @app.post("/productos", tags=["Operaciones"])
-def registrar_producto(producto: ProductRegistry, db: Session = Depends(database.get_db)):
+def registrar_producto(producto: ProductRegistry, current_user: User = Depends(get_current_user), db: Session = Depends(database.get_db)):
     """Registra información del producto antes de su ingreso físico al almacén"""
     nuevo = models.Inventory(sku=producto.sku, category=producto.categoria, status="registrado", pos_x=0, pos_y=0)
     db.add(nuevo)

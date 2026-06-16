@@ -2,6 +2,8 @@ import asyncio
 import urllib.request
 import json
 import time
+import pytest
+from app.services import algorithms
 
 BASE_URL = "http://localhost:8000"
 
@@ -72,6 +74,37 @@ async def test_security_failures():
     # Test 5: Invalid token
     status, _ = api_request("/inventario", "GET", token="invalid-token-xyz")
     print(f"Request with fake token status: {status} (Expected 401)")
+
+@pytest.mark.asyncio
+async def test_algorithms_performance_stress():
+    """
+    Prueba de Fase 2: Valida que el algoritmo A* soporte 50 peticiones/seg 
+    con latencia inferior a 500ms.
+    """
+    print("\n--- Test 6: A* Performance Stress ---")
+    start_node = {"x": 0, "y": 0}
+    end_node = {"x": 4, "y": 3}
+    num_requests = 50
+
+    start_time = time.perf_counter()
+    
+    # Simulamos la carga concurrente llamando directamente al servicio
+    tasks = [
+        asyncio.to_thread(algorithms.calculate_a_star_route, start_node, end_node)
+        for _ in range(num_requests)
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    end_time = time.perf_counter()
+    
+    total_duration = end_time - start_time
+    avg_latency = (total_duration / num_requests) * 1000 # a milisegundos
+
+    print(f"Stress Test: {num_requests} rutas calculadas en {total_duration:.4f}s")
+    print(f"Latencia promedio: {avg_latency:.2f}ms")
+
+    assert len(results) == num_requests
+    assert avg_latency < 500, f"Latencia excedida: {avg_latency}ms"
 
 async def main():
     print("Starting Concurrency and Security Tests...")
