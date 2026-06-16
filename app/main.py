@@ -135,11 +135,13 @@ async def lifespan(app: FastAPI):
                 hashed_pwd = await get_password_hash(pwd)
                 db.add(User(username=uname, hashed_password=hashed_pwd, role_id=role.id))
         
-        # Seed Vehicles (AGV_01 y AGV_02)
+        # Seed Vehicles (Sincronizados con Master_test.py y Fleet)
         if not db.query(models.Vehicle).filter(models.Vehicle.id == "AGV_01").first():
             db.add(models.Vehicle(id="AGV_01", battery_level=87.5, status="idle", pos_x=0, pos_y=0))
         if not db.query(models.Vehicle).filter(models.Vehicle.id == "AGV_02").first():
             db.add(models.Vehicle(id="AGV_02", battery_level=42.0, status="charging", pos_x=0, pos_y=0))
+        if not db.query(models.Vehicle).filter(models.Vehicle.id == "agv1").first():
+            db.add(models.Vehicle(id="agv1", battery_level=100.0, status="idle", pos_x=0, pos_y=0))
 
         if db.new:
             db.commit()

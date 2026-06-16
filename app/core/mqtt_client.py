@@ -84,9 +84,14 @@ class MQTTManager:
         db = SessionLocal()
         try:
             vehicle = db.query(Vehicle).filter(Vehicle.id == agv_id).first()
+            
+            # Lógica Upsert: Si el vehículo no existe, lo creamos inmediatamente
             if not vehicle:
-                vehicle = Vehicle(id=agv_id)
+                logger.info(f"🆕 Registrando nuevo AGV detectado en red: {agv_id}")
+                vehicle = Vehicle(id=agv_id, battery_level=0.0, status="online")
                 db.add(vehicle)
+                # Forzamos el flush para que el ID exista en la DB antes de crear el Log
+                db.flush() 
             
             new_battery = payload.get("bateria", vehicle.battery_level)
             new_status = payload.get("estado", vehicle.status)
@@ -96,7 +101,7 @@ class MQTTManager:
             vehicle.pos_x = payload.get("x", vehicle.pos_x)
             vehicle.pos_y = payload.get("y", vehicle.pos_y)
 
-            # Persistir log de telemetría para historial (sujeto a purga)
+            # Persistir log (Ahora el FK está garantizado por el flush previo)
             db.add(TelemetryLog(vehicle_id=agv_id, battery_level=new_battery, status=new_status))
             db.commit()
 
