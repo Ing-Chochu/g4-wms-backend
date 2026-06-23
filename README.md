@@ -56,6 +56,7 @@ Concentra los datos posicionales calculados por cámaras cenitales y el estado i
   "x": int,
   "y": int
 }
+```
 
 #### 2. Infraestructura, Sensores y Racks
 
