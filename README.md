@@ -1,4 +1,3 @@
-```markdown
 # WMS Backend - AGV Control & Warehouse Management System 🚀
 
 Este repositorio contiene el "cerebro" y motor de orquestación del Sistema de Gestión de Almacenes (WMS) diseñado para el control, localización y despacho de robots móviles autónomos (AGV). El backend está desarrollado bajo una arquitectura asíncrona de alto rendimiento, garantizando la consistencia transaccional de inventarios y el cierre de lazo con hardware en tiempo real a través de protocolos IoT y WebSockets.
@@ -57,8 +56,6 @@ Concentra los datos posicionales calculados por cámaras cenitales y el estado i
   "x": int,
   "y": int
 }
-
-```
 
 #### 2. Infraestructura, Sensores y Racks
 
